@@ -1,0 +1,162 @@
+name: Rust application pipeline build and release
+
+permissions: write-all
+
+on:
+  push:
+    branches: [main__]
+
+concurrency: shared-rs
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.82.0
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: Unit test
+        env:
+          CARGO_INCREMENTAL: 1
+        run: |
+          cargo nextest run
+
+  release-matrix:
+    name: Filter modified packages
+    needs: test
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch all tags
+        run: git fetch --all --tags
+
+      - name: Fetch unshallow
+        run: git fetch --unshallow
+
+      - id: set-matrix
+        run: |
+          DIRECTORIES=""
+          if git diff --name-only HEAD^ HEAD | grep -q "^Cargo.lock$"; then
+            # If Cargo.toml is changed, include all subfolders inside crates
+            DIRECTORIES=$(find crates -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | xargs)
+          else
+            echo "No changes in Cargo.toml, checking for changes in subfolders"
+            for dir in $(find crates -mindepth 1 -maxdepth 1 -type d); do
+              cd $dir
+              dirTag=$(basename $dir)
+              latesttag=$(git tag --list "${dirTag}/*" | sort -V | tail -n 1)
+              echo "Latest tag for $dirTag is $latesttag"
+              if [ -n "$latesttag" ] && [ -z "$(git diff --name-only $latesttag HEAD -- .)" ]; then
+                echo "No changes in $dir since last tag, skipping release"
+              else
+                echo "Releasing new version for $dir"
+                DIRECTORIES+="$dirTag "
+              fi
+              cd -
+            done
+          fi
+          DIRECTORIES=$(echo "$DIRECTORIES" | xargs -n1 | sort -u | xargs)
+          if [ -z "$DIRECTORIES" ]; then
+            DIRECTORIES='[]'
+          else
+            DIRECTORIES=$(echo "$DIRECTORIES" | jq -R -s -c 'split(" ")')
+          fi
+          echo "matrix=${DIRECTORIES}" >> $GITHUB_OUTPUT
+
+  release-tag:
+    needs: [release-matrix]
+    runs-on: ubuntu-latest
+    if: needs.release-matrix.outputs.matrix != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        crates: ${{fromJson(needs.release-matrix.outputs.matrix)}}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-edit
+
+      - name: Fetch all tags
+        run: git fetch --all --tags
+
+      - name: Bump Version
+        run: |
+          CRATE=$(echo "${{ matrix.crates }}" | xargs)
+          echo "Bump Version of $CRATE"
+          echo "Processing crate: $CRATE"
+          latesttag=$(git tag --list "${CRATE}/*" | sort -V | tail -n 1)
+          echo "Latest tag for $CRATE is $latesttag"
+          # Extract the version number from the latest tag
+          if [ -n "$latesttag" ]; then
+            version=$(echo "$latesttag" | sed -E 's/.*\/([0-9]+\.[0-9]+\.[0-9]+)$/\1/')
+            echo "Current version is $version"
+
+            # Bump the patch version
+            IFS='.' read -r major minor patch <<< "$version"
+            new_version="$major.$minor.$((patch + 1))"
+            echo "New version is $new_version"
+
+            # Update the version in Cargo.toml
+            cargo set-version "$new_version" -p "$CRATE"
+          else
+            echo "No tags found for $CRATE, setting initial version"
+            version="$(cargo pkgid -p "$CRATE" | cut -d "#" -f2)"
+            current_version=$(echo "$version")
+            echo "Current version is $current_version"
+            cargo set-version "$current_version" -p "$CRATE"
+          fi
+
+      - name: Commit and Push changes
+        run: |
+          CRATE=$(echo "${{ matrix.crates }}" | xargs)
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global pull.rebase false
+          git add .
+          if git diff-index --quiet HEAD --; then
+            echo "No changes to commit. Maybe because is a new project or there is no tag for $CRATE"
+          else
+            git commit -m "Bump version for $CRATE"
+            for i in {1..10}; do
+            git pull --strategy-option ours && git push origin ${{ github.head_ref }} && break || sleep $(shuf -i 1-5 -n 1)
+          done
+          fi
+
+      - name: Generate Tag
+        run: |
+          CRATE=$(echo "${{ matrix.crates }}" | xargs)
+          version=$(cargo pkgid -p "$CRATE" | cut -d "#" -f2)
+          echo "Creating TAG for: $CRATE/$version"
+          git tag "$CRATE/$version"
+          git push --tags
+
+      - name: Publish
+        run: |
+          CRATE=$(echo "${{ matrix.crates }}" | xargs)
+          echo "Publishing $CRATE"
+          cargo publish --registry kellnr --token ${{ secrets.KELLNR_AUTH_TOKEN }} -p "$CRATE" --no-verify

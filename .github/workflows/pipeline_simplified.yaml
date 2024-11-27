@@ -1,0 +1,70 @@
+name: Publish Crates
+
+permissions: write-all
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish-crates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.82.0
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      #- name: Run clippy
+      #  run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+        env:
+          CARGO_TERM_COLOR: always
+
+      #- name: Unit test
+      #  env:
+      #    CARGO_INCREMENTAL: 1
+      #  run: |
+      #    cargo nextest run --no-tests=pass
+
+      - name: Fetch all tags
+        run: git fetch --all --tags
+
+      - name: Get crates to publish
+        id: get-crates
+        run: |
+          CRATES=$(find crates -mindepth 1 -maxdepth 1 -type d)
+          PUBLISH_CRATES=""
+          for crate in $CRATES; do
+            if ! grep -q 'publish = false' "$crate/Cargo.toml"; then
+              PUBLISH_CRATES+="$crate "
+            fi
+          done
+          echo "publish_crates=${PUBLISH_CRATES}" >> $GITHUB_ENV
+
+      - name: Generate and push tags
+        run: |
+          for crate in ${{ env.publish_crates }}; do
+            crate_name=$(basename $crate)
+            version=$(cargo pkgid -p "$crate_name" | cut -d "#" -f2)
+            tag="$crate_name/$version"
+            if git rev-parse "$tag" >/dev/null 2>&1; then
+              echo "Tag $tag already exists, skipping publish"
+            else
+              echo "Creating tag $tag"
+              git tag "$tag"
+              git push origin "$tag"
+
+              echo "Publishing $crate"
+              cargo publish --registry kellnr --token ${{ secrets.KELLNR_AUTH_TOKEN }} -p "$crate_name" --no-verify
+            fi
+          done

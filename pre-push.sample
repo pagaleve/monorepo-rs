@@ -1,0 +1,7 @@
+#!/bin/sh
+
+set -eu
+
+make bump-version
+
+exit 0

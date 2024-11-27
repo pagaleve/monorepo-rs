@@ -1,0 +1,18 @@
+[package]
+name = "shared_infra"
+version = "0.1.2"
+edition = "2021"
+
+[dependencies]
+shared_common = { path = "../shared_common", version = "0.1.2" }
+axum = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+regex = "1.11.1"
+lazy_static = { version = "1.5.0" }
+
+[features]
+axum = ["dep:axum", "dep:tracing", "dep:tracing-subscriber"]
