@@ -1,0 +1,14 @@
+name: monorepo-rs
+id: ari:cloud:compass:af8146a7-7c7d-42f3-a993-6920c682799e:component/fc7a1c13-9733-41ec-b591-0e5bff7a7284/c0ff97a5-6e66-4b92-ac17-c98199793063
+description: Monorepo template for Rust
+configVersion: 1
+typeId: SERVICE
+fields:
+  tier: 4
+links: []
+relationships:
+  DEPENDS_ON: []
+labels:
+  - language:rust
+  - source:github
+customFields: null
